@@ -1,0 +1,17 @@
+# ESP-IDF Build-Artefakte
+build/
+sdkconfig.old
+
+# Managed Components (werden automatisch heruntergeladen)
+managed_components/
+dependencies.lock
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc

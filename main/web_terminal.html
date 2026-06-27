@@ -1,0 +1,608 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Cisco OOB Console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { color-scheme: dark; }
+body { margin:0; background:#0d1117; color:#c9d1d9; font-family: system-ui, sans-serif; }
+#topbar { background:#161b22; padding:8px 16px; display:flex; align-items:center; gap:8px; border-bottom:1px solid #30363d; flex-wrap:wrap; }
+#topbar h1 { margin:0; font-size:18px; font-weight:600; }
+#topbar .info { font-size:13px; color:#8b949e; }
+#topbar .spacer { flex:1; }
+#terminal { padding:8px; height:calc(100vh - 148px); }
+#cmdbar { display:flex; gap:8px; padding:8px 16px; background:#161b22; border-top:1px solid #30363d; align-items:center; }
+#cmdinput { flex:1; min-width:0; background:#0d1117; color:#c9d1d9; border:1px solid #30363d; border-radius:6px; padding:8px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:14px; }
+#cmdinput:focus { outline:none; border-color:#58a6ff; }
+#cmdinput::placeholder { color:#6e7681; }
+#cmdsend { background:#238636; border-color:#238636; color:#fff; white-space:nowrap; }
+#cmdsend:hover { background:#2ea043; }
+#statusbar { background:#161b22; padding:6px 16px; font-size:13px; border-top:1px solid #30363d; display:flex; justify-content:space-between; align-items:center; }
+@keyframes wg-blink { 0%,100%{opacity:1} 50%{opacity:0} }
+button, select { background:#21262d; color:#c9d1d9; border:1px solid #30363d; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:13px; }
+button:hover, select:hover { background:#30363d; }
+button:active { background:#484f58; }
+button.danger { border-color:#f85149; color:#f85149; }
+button.danger:hover { background:#2d1316; }
+button.warn { border-color:#e3b341; color:#e3b341; }
+button.warn:hover { background:#2a2109; }
+#conn { font-weight:600; }
+#conn.connected { color:#3fb950; }
+#conn.disconnected { color:#f85149; }
+.xterm { height:100%; }
+
+/* Reboot modal */
+#reboot-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:100; align-items:center; justify-content:center; }
+#reboot-modal.show { display:flex; }
+#reboot-box { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:28px 36px; max-width:380px; text-align:center; }
+#reboot-box h3 { margin:0 0 12px; }
+#reboot-box p { color:#8b949e; font-size:14px; margin:0 0 20px; }
+#reboot-box .btns { display:flex; gap:10px; justify-content:center; }
+
+/* Settings drawer */
+#settings-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:300; }
+#settings-overlay.show { display:block; }
+#settings-drawer {
+  position:fixed; top:0; right:-440px; width:420px; height:100vh;
+  background:#161b22; border-left:1px solid #30363d;
+  z-index:301; transition:right .25s ease; overflow-y:auto;
+  box-sizing:border-box; display:flex; flex-direction:column;
+}
+#settings-drawer.open { right:0; }
+#settings-header {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:16px 20px; border-bottom:1px solid #30363d;
+  background:#1c2128; position:sticky; top:0; z-index:1;
+}
+#settings-header h2 { margin:0; font-size:16px; font-weight:600; }
+#settings-close {
+  background:none; border:none; color:#8b949e; font-size:20px;
+  cursor:pointer; padding:4px 8px; border-radius:4px; line-height:1;
+}
+#settings-close:hover { background:#30363d; color:#c9d1d9; }
+.s-tabs { display:flex; gap:0; border-bottom:1px solid #30363d; background:#161b22; }
+.s-tab {
+  flex:1; padding:10px 0; text-align:center; font-size:13px; font-weight:500;
+  cursor:pointer; border:none; background:none; color:#8b949e;
+  border-bottom:2px solid transparent; transition:color .15s;
+}
+.s-tab:hover { color:#c9d1d9; background:#21262d; }
+.s-tab.active { color:#58a6ff; border-bottom-color:#58a6ff; }
+.s-pane { display:none; padding:20px; flex-direction:column; gap:12px; }
+.s-pane.active { display:flex; }
+.s-field { display:flex; flex-direction:column; gap:4px; }
+.s-field label { font-size:12px; color:#8b949e; font-weight:500; text-transform:uppercase; letter-spacing:.04em; }
+.s-field input, .s-field select {
+  width:100%; padding:8px 10px; background:#0d1117; border:1px solid #30363d;
+  color:#c9d1d9; border-radius:6px; font-size:13px; box-sizing:border-box;
+}
+.s-field input:focus, .s-field select:focus { outline:none; border-color:#58a6ff; }
+.s-field .hint { font-size:11px; color:#6e7681; }
+.s-row { display:flex; gap:10px; }
+.s-row .s-field { flex:1; }
+.s-save {
+  padding:9px 20px; background:#238636; border-color:#238636;
+  color:#fff; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500;
+  align-self:flex-start; margin-top:4px;
+}
+.s-save:hover { background:#2ea043; }
+.s-msg { font-size:12px; font-weight:500; padding:4px 0; min-height:18px; }
+.s-section-title {
+  font-size:11px; color:#8b949e; font-weight:600; text-transform:uppercase;
+  letter-spacing:.06em; padding:4px 0 2px; border-bottom:1px solid #21262d;
+}
+.s-pubkey {
+  font-family: ui-monospace, monospace; font-size:11px; word-break:break-all;
+  background:#0d1117; border:1px solid #30363d; border-radius:6px;
+  padding:8px 10px; color:#8b949e; user-select:all;
+}
+.s-status-badge {
+  display:inline-flex; align-items:center; gap:6px;
+  font-size:12px; font-weight:500; padding:4px 10px;
+  border-radius:20px; border:1px solid #30363d;
+}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+</head>
+<body>
+<div id="topbar">
+  <h1>Cisco Out-of-Band Console</h1>
+  <span class="info" id="ip">WiFi: ...</span>
+  <span class="info" id="eth_ip" style="display:none">ETH: ...</span>
+  <select id="baudsel" onchange="changeBaud()">
+    <option value="9600">9600</option>
+    <option value="19200">19200</option>
+    <option value="38400">38400</option>
+    <option value="57600">57600</option>
+    <option value="115200">115200</option>
+  </select>
+  <button onclick="toggleConnect()" id="connBtn">Connect</button>
+  <div class="spacer"></div>
+  <span class="info" id="apstate" style="display:none;color:#e3b341;font-weight:600">⚠ AP-Modus</span>
+  <span class="info" id="usbstate" style="color:#8b949e">USB: –</span>
+  <button onclick="openSettings()" title="Einstellungen" style="padding:6px 10px;font-size:15px;">⚙</button>
+</div>
+
+<!-- Reboot Modal -->
+<div id="reboot-modal">
+  <div id="reboot-box">
+    <h3 id="modal-title">ESP32 Reboot</h3>
+    <p id="modal-msg">ESP32 wird neu gestartet.</p>
+    <div class="btns">
+      <button onclick="confirmAction()" id="modal-ok" style="background:#238636;border-color:#238636;color:#fff">Bestätigen</button>
+      <button onclick="closeModal()">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Drawer -->
+<div id="settings-overlay" onclick="closeSettings()"></div>
+<div id="settings-drawer">
+  <div id="settings-header">
+    <h2>Einstellungen</h2>
+    <button id="settings-close" onclick="closeSettings()">✕</button>
+  </div>
+  <div class="s-tabs">
+    <button class="s-tab active" onclick="switchTab('network')">Netzwerk &amp; Seriell</button>
+    <button class="s-tab" onclick="switchTab('wg')">WireGuard VPN</button>
+  </div>
+
+  <!-- Network Tab -->
+  <div class="s-pane active" id="tab-network">
+    <div class="s-section-title">WLAN</div>
+    <div class="s-field">
+      <label>SSID</label>
+      <input id="s-ssid" type="text" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="s-field">
+      <label>Passwort</label>
+      <input id="s-password" type="password" placeholder="leer lassen = unverändert" autocomplete="off">
+    </div>
+    <div class="s-section-title" style="margin-top:4px">WLAN FALLBACK-AP</div>
+    <div class="s-field">
+      <label>AP-SSID</label>
+      <input id="s-ap-ssid" type="text" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="s-field">
+      <label>AP-Passwort</label>
+      <input id="s-ap-pass" type="password" placeholder="leer lassen = unverändert" autocomplete="off">
+      <span style="font-size:11px;color:#6e7681">Aktiv wenn kein WLAN erreichbar (nach 8 Versuchen)</span>
+    </div>
+    <div class="s-section-title" style="margin-top:4px">MAC-Adressen</div>
+    <div class="s-field">
+      <label>WLAN MAC</label>
+      <input id="s-wifi-mac" type="text" autocomplete="off" spellcheck="false"
+             pattern="^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"
+             title="Format: XX:XX:XX:XX:XX:XX  –  leer lassen für automatisch">
+    </div>
+    <div class="s-field">
+      <label>LAN MAC</label>
+      <input id="s-eth-mac" type="text" autocomplete="off" spellcheck="false"
+             pattern="^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"
+             title="Format: XX:XX:XX:XX:XX:XX  –  leer lassen für automatisch">
+      <span style="font-size:11px;color:#6e7681">Leer = Auto (eFuse). Änderungen erfordern Neustart.</span>
+    </div>
+    <div class="s-section-title" style="margin-top:4px">Seriell</div>
+    <div class="s-field">
+      <label>Baudrate</label>
+      <select id="s-baud">
+        <option value="9600">9600</option>
+        <option value="19200">19200</option>
+        <option value="38400">38400</option>
+        <option value="57600">57600</option>
+        <option value="115200">115200</option>
+      </select>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+      <button class="s-save" onclick="saveNetwork()">Speichern</button>
+      <span class="s-msg" id="msg-network"></span>
+    </div>
+  </div>
+
+  <!-- WireGuard Tab -->
+  <div class="s-pane" id="tab-wg">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div class="s-section-title" style="border:none;padding:0">STATUS</div>
+      <span class="s-status-badge" id="s-wg-badge" style="color:#8b949e">–</span>
+    </div>
+    <div class="s-field">
+      <label>Aktiviert</label>
+      <select id="s-wg-enabled">
+        <option value="0">Deaktiviert</option>
+        <option value="1">Aktiviert</option>
+      </select>
+    </div>
+    <div class="s-section-title">SCHLÜSSEL</div>
+    <div class="s-field">
+      <label>Privater Schlüssel (ESP32)</label>
+      <input id="s-wg-privkey" type="password" placeholder="leer lassen = unverändert" autocomplete="off">
+      <span class="hint s-field" id="s-privkey-hint" style="font-size:11px;color:#6e7681"></span>
+    </div>
+    <div class="s-field">
+      <label>ESP32 Public Key (für Server-Config)</label>
+      <div class="s-pubkey" id="s-pubkey-display">YEcZ19DyakGAOoBD6u8RRwre8phDfjNt2cbAG84I+xk=</div>
+    </div>
+    <div class="s-field">
+      <label>Server Public Key (Peer)</label>
+      <input id="s-wg-peer-pubkey" type="text" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="s-section-title">VERBINDUNG</div>
+    <div class="s-row">
+      <div class="s-field">
+        <label>Server Endpoint (IP / Host)</label>
+        <input id="s-wg-endpoint" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="s-field" style="max-width:90px">
+        <label>Port</label>
+        <input id="s-wg-port" type="number" min="1" max="65535">
+      </div>
+    </div>
+    <div class="s-row">
+      <div class="s-field">
+        <label>VPN-IP (ESP32)</label>
+        <input id="s-wg-local-ip" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="s-field">
+        <label>Subnetzmaske</label>
+        <input id="s-wg-local-mask" type="text" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+    <div class="s-field">
+      <label>Keepalive (Sekunden, 0 = aus)</label>
+      <input id="s-wg-keepalive" type="number" min="0" max="255" style="max-width:120px">
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+      <button class="s-save" onclick="saveWg()">Speichern &amp; Neu verbinden</button>
+      <span class="s-msg" id="msg-wg"></span>
+    </div>
+  </div>
+
+  <!-- Reboot -->
+  <div style="padding:14px 20px;border-top:1px solid #30363d;">
+    <button class="warn" onclick="closeSettings();doReboot()" style="width:100%;padding:9px 14px;font-size:13px;font-weight:500;">ESP32 Neu starten</button>
+  </div>
+</div>
+
+<div id="terminal"></div>
+<div id="cmdbar">
+  <input type="text" id="cmdinput" placeholder="Befehl an Cisco, z.B. show version" autocomplete="off" spellcheck="false">
+  <button type="button" id="cmdsend" onclick="sendCommand()">Senden</button>
+</div>
+<div id="statusbar">
+  <div style="display:flex;gap:16px;align-items:center">
+    <span id="conn" class="disconnected">DISCONNECTED</span>
+    <span class="info" style="font-size:13px">Baud: <span id="baud">9600</span></span>
+    <span id="wg_state" style="display:none;font-size:13px">WG: ...</span>
+    <span id="msg"></span>
+  </div>
+  <div style="display:flex;gap:16px;align-items:center">
+    <span id="wg_ip_el" style="display:none;font-size:13px;color:#8b949e">VPN: ...</span>
+    <span id="active_ip_el" style="display:none;font-size:13px;color:#8b949e">IP: ...</span>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+
+<script>
+let term = null;
+let fit = null;
+let ws = null;
+let connected = false;
+let reconnectTimer = null;
+let usbReady = false;
+
+function initTerminal() {
+  term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    theme: {
+      background: '#0d1117',
+      foreground: '#c9d1d9',
+      cursor: '#c9d1d9',
+      selection: '#264f78'
+    },
+    convertEol: false,
+    disableStdin: false,
+    localEcho: false
+  });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('terminal'));
+  fit.fit();
+  term.onData(data => sendWsData(data));
+  document.getElementById('terminal').addEventListener('click', () => term.focus());
+  window.addEventListener('resize', () => { if (fit) fit.fit(); });
+}
+
+function setStatus(text, isConnected) {
+  const el = document.getElementById('conn');
+  el.textContent = text;
+  el.className = isConnected ? 'connected' : 'disconnected';
+  document.getElementById('connBtn').textContent = isConnected ? 'Disconnect' : 'Connect';
+  connected = isConnected;
+}
+
+function updateBaud(baud) {
+  document.getElementById('baud').textContent = baud;
+  const sel = document.getElementById('baudsel');
+  if (sel) sel.value = String(baud);
+}
+
+function showMsg(text, timeout = 2500) {
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  if (timeout) setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, timeout);
+}
+
+function sendWsData(data) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { showMsg('WebSocket nicht verbunden'); return false; }
+  if (!usbReady) showMsg('USB noch nicht verbunden');
+  ws.send(data);
+  return true;
+}
+
+function sendCommand() {
+  const input = document.getElementById('cmdinput');
+  if (!input) return;
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  if (sendWsData(cmd + '\r')) { input.value = ''; showMsg('→ ' + cmd); input.focus(); }
+}
+
+function connect() {
+  if (ws) ws.close();
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { setStatus('CONNECTED', true); showMsg('WebSocket verbunden'); term.focus(); loadStatus(); };
+  ws.onclose = () => { setStatus('DISCONNECTED', false); ws = null; scheduleReconnect(); };
+  ws.onerror = () => setStatus('ERROR', false);
+  ws.onmessage = (ev) => {
+    if (!term) return;
+    if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+    else term.write(ev.data);
+  };
+}
+
+function disconnect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (ws) { ws.close(); ws = null; }
+  setStatus('DISCONNECTED', false);
+}
+
+function toggleConnect() { if (connected) disconnect(); else connect(); }
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (!connected) { showMsg('Reconnecting...'); connect(); }
+  }, 1800);
+}
+
+function sendBreak() {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send('__BREAK__'); showMsg('BREAK gesendet'); }
+  else fetch('/break', {method:'POST'}).then(() => showMsg('BREAK gesendet'));
+}
+
+function changeBaud() {
+  const baud = document.getElementById('baudsel').value;
+  fetch('/baud', {method:'POST', body: baud})
+    .then(r => { if (r.ok) { updateBaud(baud); showMsg('Baudrate geändert'); } else showMsg('Fehler'); })
+    .catch(() => showMsg('Netzwerkfehler'));
+}
+
+async function loadStatus() {
+  try {
+    const r = await fetch('/status');
+    const j = await r.json();
+    if (j.ip) document.getElementById('ip').textContent = 'WiFi: ' + j.ip;
+    const ethEl = document.getElementById('eth_ip');
+    if (ethEl && j.eth_ip && j.eth_ip !== '0.0.0.0') {
+      ethEl.textContent = 'ETH: ' + j.eth_ip; ethEl.style.display = '';
+    } else if (ethEl) ethEl.style.display = 'none';
+    const wgEl = document.getElementById('wg_state');
+    const wgIpEl = document.getElementById('wg_ip_el');
+    if (wgEl && j.wg_ip && j.wg_ip !== '') {
+      if (j.wg_up) {
+        wgEl.textContent = 'WG: ✓';
+        wgEl.style.color = '#3fb950';
+        wgEl.style.animation = '';
+      } else {
+        wgEl.textContent = 'WG: Kein Handshake';
+        wgEl.style.color = '#f85149';
+        wgEl.style.animation = 'wg-blink 1s step-start infinite';
+      }
+      wgEl.style.display = '';
+      if (wgIpEl) { wgIpEl.textContent = 'WG: ' + j.wg_ip; wgIpEl.style.display = ''; }
+    } else {
+      if (wgEl) wgEl.style.display = 'none';
+      if (wgIpEl) wgIpEl.style.display = 'none';
+    }
+    if (j.baud) updateBaud(j.baud);
+    usbReady = !!j.usb;
+    const usb = document.getElementById('usbstate');
+    if (usb) { usb.textContent = 'USB: ' + (j.usb ? 'verbunden' : 'getrennt'); usb.style.color = j.usb ? '#3fb950' : '#8b949e'; }
+    const apEl = document.getElementById('apstate');
+    if (apEl) apEl.style.display = j.ap ? '' : 'none';
+    const actEl = document.getElementById('active_ip_el');
+    if (actEl && j.active_ip && j.active_ip !== '0.0.0.0') {
+      const label = (j.eth_ip && j.eth_ip !== '0.0.0.0' && j.eth_ip === j.active_ip) ? 'LAN' : 'IP';
+      actEl.textContent = label + ': ' + j.active_ip;
+      actEl.style.display = '';
+    } else if (actEl) {
+      actEl.style.display = 'none';
+    }
+  } catch(e) {}
+}
+
+/* ---- Reboot ---- */
+let pendingAction = null;
+
+function doReboot() {
+  pendingAction = 'reboot';
+  document.getElementById('modal-title').textContent = 'ESP32 Reboot';
+  document.getElementById('modal-msg').textContent   = 'ESP32 wird neu gestartet. OTG-Modus bleibt aktiv.';
+  document.getElementById('reboot-modal').classList.add('show');
+}
+
+function closeModal() { document.getElementById('reboot-modal').classList.remove('show'); pendingAction = null; }
+
+async function confirmAction() {
+  const action = pendingAction;
+  closeModal();
+  if (action === 'reboot') { showMsg('Rebooting...', 8000); await fetch('/reboot', {method:'POST'}).catch(()=>{}); }
+}
+
+document.getElementById('reboot-modal').addEventListener('click', function(e){ if (e.target === this) closeModal(); });
+
+/* ---- Settings Drawer ---- */
+let activeTab = 'network';
+
+function openSettings() {
+  document.getElementById('settings-drawer').classList.add('open');
+  document.getElementById('settings-overlay').classList.add('show');
+  loadSettingsData();
+}
+
+function closeSettings() {
+  document.getElementById('settings-drawer').classList.remove('open');
+  document.getElementById('settings-overlay').classList.remove('show');
+}
+
+function switchTab(name) {
+  activeTab = name;
+  document.querySelectorAll('.s-tab').forEach((t, i) => {
+    t.classList.toggle('active', (i === 0 && name === 'network') || (i === 1 && name === 'wg'));
+  });
+  document.getElementById('tab-network').classList.toggle('active', name === 'network');
+  document.getElementById('tab-wg').classList.toggle('active', name === 'wg');
+}
+
+async function loadSettingsData() {
+  try {
+    const [cfg, wg] = await Promise.all([
+      fetch('/config-json').then(r => r.json()),
+      fetch('/wg-json').then(r => r.json())
+    ]);
+    // Network tab
+    document.getElementById('s-ssid').value    = cfg.ssid || '';
+    document.getElementById('s-baud').value    = String(cfg.baud || 9600);
+    document.getElementById('s-password').value = '';
+    document.getElementById('s-ap-ssid').value = cfg.ap_ssid || 'ESP32S3_AP';
+    document.getElementById('s-ap-pass').value  = '';
+    // MAC fields
+    const wifiMacEl = document.getElementById('s-wifi-mac');
+    const ethMacEl  = document.getElementById('s-eth-mac');
+    wifiMacEl.value       = cfg.wifi_mac || '';
+    wifiMacEl.placeholder = cfg.wifi_mac_auto ? `Auto (${cfg.wifi_mac_auto})` : 'Auto';
+    ethMacEl.value        = cfg.eth_mac  || '';
+    ethMacEl.placeholder  = cfg.eth_mac_auto  ? `Auto (${cfg.eth_mac_auto})`  : 'Auto';
+    // WG tab
+    document.getElementById('s-wg-enabled').value    = wg.enabled ? '1' : '0';
+    document.getElementById('s-wg-peer-pubkey').value = wg.peer_pubkey || '';
+    document.getElementById('s-wg-endpoint').value   = wg.endpoint || '';
+    document.getElementById('s-wg-port').value        = wg.port || 51820;
+    document.getElementById('s-wg-local-ip').value    = wg.local_ip || '10.8.0.3';
+    document.getElementById('s-wg-local-mask').value  = wg.local_mask || '255.255.255.0';
+    document.getElementById('s-wg-keepalive').value   = wg.keepalive || 25;
+    document.getElementById('s-wg-privkey').value     = '';
+    document.getElementById('s-privkey-hint').textContent = wg.has_privkey ? 'Schlüssel gesetzt ✓' : 'Kein Schlüssel gesetzt';
+    // Badge
+    const badge = document.getElementById('s-wg-badge');
+    if (wg.enabled) {
+      badge.textContent = wg.up ? '● Verbunden' : '○ Kein Handshake';
+      badge.style.color = wg.up ? '#3fb950' : '#e3b341';
+      badge.style.borderColor = wg.up ? '#2ea043' : '#6e5a10';
+    } else {
+      badge.textContent = '— Deaktiviert';
+      badge.style.color = '#6e7681';
+      badge.style.borderColor = '#30363d';
+    }
+  } catch(e) { showSettingsMsg('network', 'Ladefehler', '#f85149'); }
+}
+
+function showSettingsMsg(which, text, color) {
+  const el = document.getElementById('msg-' + which);
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = color || '#3fb950';
+  setTimeout(() => { if (el.textContent === text) el.textContent = ''; }, 3000);
+}
+
+async function saveNetwork() {
+  const wifiMac = document.getElementById('s-wifi-mac').value.trim();
+  const ethMac  = document.getElementById('s-eth-mac').value.trim();
+  const macPat  = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+  if (wifiMac && !macPat.test(wifiMac)) {
+    showSettingsMsg('network', 'Ungültige WLAN-MAC (Format: XX:XX:XX:XX:XX:XX)', '#f85149'); return;
+  }
+  if (ethMac && !macPat.test(ethMac)) {
+    showSettingsMsg('network', 'Ungültige LAN-MAC (Format: XX:XX:XX:XX:XX:XX)', '#f85149'); return;
+  }
+  const params = new URLSearchParams({
+    ssid:     document.getElementById('s-ssid').value,
+    password: document.getElementById('s-password').value,
+    baud:     document.getElementById('s-baud').value,
+    ap_ssid:  document.getElementById('s-ap-ssid').value,
+    ap_pass:  document.getElementById('s-ap-pass').value,
+    wifi_mac: wifiMac,
+    eth_mac:  ethMac
+  });
+  try {
+    const r = await fetch('/config', {method:'POST', body: params.toString(),
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}});
+    const j = await r.json();
+    if (j.ok && j.rebooting) {
+      showSettingsMsg('network', 'Gespeichert — ESP startet neu…', '#e3b341');
+    } else if (j.ok) {
+      showSettingsMsg('network', 'Gespeichert ✓', '#3fb950');
+      updateBaud(document.getElementById('s-baud').value);
+    } else showSettingsMsg('network', 'Fehler', '#f85149');
+  } catch(e) { showSettingsMsg('network', 'Netzwerkfehler', '#f85149'); }
+}
+
+async function saveWg() {
+  const privkey = document.getElementById('s-wg-privkey').value.trim();
+  const params = new URLSearchParams({
+    enabled:    document.getElementById('s-wg-enabled').value,
+    peer_pubkey:document.getElementById('s-wg-peer-pubkey').value.trim(),
+    endpoint:   document.getElementById('s-wg-endpoint').value.trim(),
+    port:       document.getElementById('s-wg-port').value,
+    local_ip:   document.getElementById('s-wg-local-ip').value.trim(),
+    local_mask: document.getElementById('s-wg-local-mask').value.trim(),
+    keepalive:  document.getElementById('s-wg-keepalive').value
+  });
+  if (privkey) params.set('privkey', privkey);
+  try {
+    const r = await fetch('/wg', {method:'POST', body: params.toString(),
+      headers:{'Content-Type':'application/x-www-form-urlencoded'}});
+    const j = await r.json();
+    if (j.ok) {
+      showSettingsMsg('wg', 'Gespeichert ✓', '#3fb950');
+      setTimeout(loadSettingsData, 2000);
+    } else showSettingsMsg('wg', 'Fehler', '#f85149');
+  } catch(e) { showSettingsMsg('wg', 'Netzwerkfehler', '#f85149'); }
+}
+
+function initBaudSelect() { document.getElementById('baudsel').value = '9600'; }
+
+function boot() {
+  initTerminal();
+  initBaudSelect();
+  setStatus('DISCONNECTED', false);
+  document.getElementById('ip').textContent = 'IP: ...';
+  const cmdinput = document.getElementById('cmdinput');
+  if (cmdinput) cmdinput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); sendCommand(); } });
+  setTimeout(() => connect(), 300);
+  setInterval(loadStatus, 3000);
+  loadStatus();
+}
+
+window.onload = boot;
+</script>
+</body>
+</html>
