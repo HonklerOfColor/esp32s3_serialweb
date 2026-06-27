@@ -4,6 +4,9 @@ Out-of-Band-Zugriff auf Cisco Switches (Catalyst, Nexus, IE usw.) über ein Web-
 
 **Kein UART, kein MAX3232, keine GPIO-Leitungen** — die serielle Konsole läuft ausschließlich über den **nativen USB-C OTG-Port** des ESP32-S3.
 
+<img width="1244" height="956" alt="Screenshot 2026-06-27 at 14 48 33" src="https://github.com/user-attachments/assets/b18984b9-f86d-40e8-a734-1e18753518d0" />
+
+
 ## Architektur
 
 ```
