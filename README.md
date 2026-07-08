@@ -2,7 +2,7 @@
 
 Out-of-Band-Zugriff auf Cisco Switches (Catalyst, Nexus, IE usw.) über ein Web-Terminal im Browser.
 
-**Kein UART, kein MAX3232, keine GPIO-Leitungen** — die serielle Konsole läuft ausschließlich über den **nativen USB-C OTG-Port** des ESP32-S3.
+**Kein UART, kein MAX3232, keine GPIO-Leitungen** — die serielle Konsole läuft über den **nativen USB-C OTG-Port** des ESP32-S3 (wenn USB OTG in den Einstellungen aktiviert ist).
 
 <img width="1244" height="956" alt="Screenshot 2026-06-27 at 14 48 33" src="https://github.com/user-attachments/assets/b18984b9-f86d-40e8-a734-1e18753518d0" />
 
@@ -10,14 +10,23 @@ Out-of-Band-Zugriff auf Cisco Switches (Catalyst, Nexus, IE usw.) über ein Web-
 ## Architektur
 
 ```
-Browser  ←WebSocket/HTTP→  ESP32-S3 (WiFi STA)   ←USB-C OTG (Host)→  Cisco USB Console
+Browser  ←WebSocket/HTTP→  ESP32-S3 (WiFi STA oder W5500 ETH)   ←USB-C OTG (Host)→  Cisco USB Console
                                      │
                             Ethernet (W5500 SPI)  ←RJ45→  LAN-Switch
 ```
 
-Der ESP32-S3 kann **gleichzeitig** über WiFi und über den W5500-Ethernet-Adapter erreichbar sein. Das Web-Terminal startet, sobald eine der beiden Schnittstellen eine IP-Adresse erhält.
-
 Der ESP32-S3 arbeitet als **USB-Host** (OTG). Der Cisco Switch erscheint als **USB-Gerät** (CDC-ACM). Daten vom Switch werden per WebSocket an den Browser durchgereicht, Tastatureingaben gehen den gleichen Weg zurück.
+
+### Netzwerk-Priorität (ETH ↔ WiFi)
+
+| Situation | Verhalten |
+|-----------|-----------|
+| Nur WiFi verbunden | Web-Terminal über WLAN-IP erreichbar |
+| ETH erhält DHCP-IP | **Ethernet wird bevorzugt** (Default-Route), **WLAN-STA wird ausgeschaltet** (Strom sparen) |
+| ETH-Link oder DHCP-IP verloren | WLAN-STA wird automatisch wieder aktiviert |
+| Kein WLAN nach 8 Versuchen | Fallback-AP-Modus (`192.168.4.1`) |
+
+Das Web-Terminal startet, sobald eine Schnittstelle (WiFi, ETH oder AP) eine IP-Adresse erhält.
 
 ## W5500 SPI-Ethernet
 
@@ -63,12 +72,12 @@ Das XIAO hat **nur einen USB-C-Anschluss** — kein separater UART-Port wie am D
 ```
 XIAO USB-C  ──OTG-Kabel/Adapter──►  Cisco USB Console (USB-A / Mini-USB)
      │
-  WiFi ─┴──► Browser (http://<ip>/)
+  WiFi/ETH ─┴──► Browser (http://<ip>/)
 ```
 
 - Das XIAO arbeitet als **USB-Host**, der Cisco Switch als **USB-Gerät** (CDC-ACM, typ. VID `0x05f9` / PID `0x4004`)
 - **OTG-Adapter** oder Kabel mit Host-Rolle nötig (USB-C → USB-A)
-- **Kein** MAX3232, **kein** UART an GPIO — nur der USB-C
+- **Kein** MAX3232, **kein** UART an GPIO — nur der USB-C (wenn OTG aktiviert)
 
 ### Stromversorgung & VBUS (wichtig am XIAO)
 
@@ -104,7 +113,7 @@ Draufsicht XIAO ESP32-S3 — nur die für dieses Projekt wichtigen Anschlüsse:
 
 | XIAO-Pin | GPIO | Funktion in diesem Projekt |
 |----------|------|--------------------------|
-| **USB-C** | 19, 20 | Cisco-Konsole (OTG Host) |
+| **USB-C** | 19, 20 | Cisco-Konsole (OTG Host) **oder** Serial/JTAG (Flashen/Monitor) |
 | **5V** | VBUS | 5-V-Versorgung für Cisco-USB (bei Batteriebetrieb von außen) |
 | **GND** | — | Masse |
 | **D6** | 43 | UART TX → optional USB-UART-Adapter für `idf.py monitor` |
@@ -164,7 +173,7 @@ flowchart TB
 |-------|------------|
 | Schottky-Diode | Zwischen Boost-Ausgang und Pin `5V`: **Anode** → Boost, **Kathode** → `5V` (laut Seeed-Wiki bei externer Einspeisung) |
 | Masse | GND von Boost, XIAO und Cisco gemeinsam |
-| USB-C am PC | Beim Batteriebetrieb **nicht** gleichzeitig am PC und Cisco hängen — PHY-Konflikt, siehe oben |
+| USB-C am PC | Beim Batteriebetrieb **nicht** gleichzeitig am PC und Cisco hängen — PHY-Konflikt, siehe unten |
 | Strombedarf | Cisco-USB-Console typ. 50–100 mA; Boost-Modul mit ≥ 500 mA wählen |
 | Laden | Viele Boost/Lade-Module laden die LiPo über einen eigenen USB-C-Eingang, während der Last-Ausgang das XIAO + VBUS versorgt |
 
@@ -174,14 +183,20 @@ flowchart TB
 
 Am ESP32-S3 teilen sich **USB Serial/JTAG** und **USB OTG** dieselbe interne PHY. Gleichzeitig Flashen/Monitor **und** Cisco-Host am selben USB-C geht nicht.
 
-| Modus | USB-C | Debug-Ausgabe |
-|-------|-------|---------------|
-| **Normal** (Cisco OOB) | OTG Host → Cisco | UART über **D6/D7** (GPIO43/44) oder nur Web-UI |
-| **Flash-Modus** (Web-Button) | Serial/JTAG → PC | `idf.py flash monitor` wie gewohnt |
+Der Modus wird über **⚙ → Netzwerk & Seriell → USB OTG** gesteuert (erfordert Neustart):
 
-**Erstes Flashen:** XIAO per USB-C am PC, `idf.py flash`. Danach normal booten → USB-C für Cisco reservieren.
+| USB OTG | USB-C-Funktion | Debug-Ausgabe |
+|-------|----------------|---------------|
+| **Deaktiviert** (Standard) | Serial/JTAG → PC | `idf.py flash monitor` am USB-C |
+| **Aktiviert** | OTG Host → Cisco | UART über **D6/D7** (GPIO43/44) oder nur Web-UI |
 
-**Erneut flashen:** Im Web-UI **Flash-Modus** wählen → Reboot → XIAO erscheint am PC als serieller Port → flashen → normal rebooten.
+**Typischer Ablauf:**
+
+1. **Entwicklung / Flashen:** USB OTG **deaktiviert** lassen → XIAO per USB-C am PC → `idf.py flash monitor`
+2. **Produktivbetrieb (Cisco OOB):** In den Einstellungen USB OTG **aktivieren** → Neustart → USB-C für Cisco reservieren
+3. **Debug bei aktivem OTG:** Optional USB-UART-Adapter an D6/D7 oder Logs nur im Web-Terminal
+
+> Ohne Neustart nach OTG-Änderung kann der ESP hängen bleiben — die Web-UI warnt entsprechend.
 
 ### Andere ESP32-S3-Boards (z. B. DevKitC-1)
 
@@ -191,14 +206,18 @@ Boards mit **zwei** USB-Anschlüssen: Cisco an **USB-OTG**, Flashen/Monitor am *
 
 - Web-Terminal mit xterm.js (dunkles Theme)
 - WebSocket `/ws` für bidirektionale Konsole
+- Befehlszeile unter dem Terminal (einzelne Befehle an Cisco senden)
 - Break-Signal (250 ms) für ROMMON / Unterbrechung
 - Baudrate: 9600 / 19200 / 38400 / 57600 / 115200
-- **Settings-Drawer** (⚙-Button): WLAN, Baudrate und WireGuard inline konfigurieren
+- **Settings-Drawer** (⚙-Button): WLAN, AP-Fallback, MAC-Adressen, Baudrate, OTG und WireGuard inline konfigurieren
+- **USB OTG ein-/ausschaltbar** (Standard: deaktiviert — erleichtert Flashen und Serial Monitor)
 - Bis zu 4 gleichzeitige WebSocket-Clients
-- **Dual-Stack-Netzwerk**: WiFi STA + W5500 SPI-Ethernet gleichzeitig
-- Status-Anzeige in der Web-UI: WiFi-IP, ETH-IP und WireGuard-IP
-- **WiFi-Fallback-AP**: Kein WLAN erreichbar → automatischer Hotspot-Modus
+- **W5500 SPI-Ethernet** mit automatischer ETH/WiFi-Umschaltung
+- Status-Anzeige in der Web-UI: WiFi-IP, ETH-IP, aktive IP, USB- und WireGuard-Status
+- **WiFi-Fallback-AP**: Kein WLAN erreichbar → automatischer Hotspot-Modus (SSID/Passwort konfigurierbar)
 - **WireGuard VPN**: optionaler VPN-Tunnel zur sicheren Fernwartung
+- **Deep Sleep / Ausschalten** über Web-UI (Reset-Taste zum Wieder-Einschalten)
+- **MTU 1420** auf allen Netzwerkschnittstellen (WireGuard-kompatibel)
 
 ## Projektstruktur
 
@@ -207,13 +226,15 @@ esp32s3_serialweb/
 ├── CMakeLists.txt
 ├── partitions.csv          ← 2 MB App-Partition (für WireGuard + OTG)
 ├── sdkconfig.defaults
+├── components/
+│   └── trombik__esp_wireguard/   ← WireGuard-Komponente (IDF-6.0-Patches)
 └── main/
     ├── CMakeLists.txt
     ├── idf_component.yml
-    ├── main.c              ← HTTP-Server, WiFi, AP-Fallback, Events
-    ├── config.c/h          ← NVS-Konfiguration (WiFi + WireGuard)
+    ├── main.c              ← HTTP-Server, WiFi, AP-Fallback, USB-Host, Events
+    ├── config.c/h          ← NVS-Konfiguration (WiFi, OTG, MAC, WireGuard)
     ├── eth_w5500.c/h       ← W5500 SPI-Ethernet-Treiber + Pin-Defines
-    ├── wg_client.c/h       ← WireGuard-Client (trombik/esp_wireguard)
+    ├── wg_client.c/h       ← WireGuard-Client
     └── web_terminal.html   ← Weboberfläche (eingebettet ins Binary)
 ```
 
@@ -234,34 +255,66 @@ http://<ip-des-esp32>/
 
 ## Erste Konfiguration
 
-1. Beim ersten Start verbindet sich der ESP mit SSID `net1` (Standard-Passwort in `config.c`).
-2. IP im Serial Monitor ablesen oder Router-DHCP prüfen.
-3. Im Browser `http://<ip>/` öffnen → **⚙** (Settings) anklicken → Tab **Netzwerk & Seriell** → WLAN-Daten eintragen → Speichern.
-4. Cisco per **OTG-Kabel** an den USB-C des XIAO anschließen (XIAO = Host).
+1. Beim ersten Start verbindet sich der ESP mit der Standard-SSID `net1` (Passwort in `config.c` oder bereits in NVS).
+2. **USB OTG ist standardmäßig deaktiviert** — der USB-C-Port funktioniert als Serial/JTAG für Flashen und Monitor.
+3. IP im Serial Monitor ablesen oder Router-DHCP prüfen.
+4. Im Browser `http://<ip>/` öffnen → **⚙** (Settings) anklicken → Tab **Netzwerk & Seriell**:
+   - WLAN-Daten eintragen
+   - **USB OTG auf „Aktiviert"** setzen (für Cisco-Konsole)
+   - Speichern → ESP startet automatisch neu
+5. Cisco per **OTG-Kabel** an den USB-C des XIAO anschließen (XIAO = Host).
 
 ### WiFi-Fallback: AP-Modus
 
 Wenn das konfigurierte WLAN nach **8 Verbindungsversuchen** nicht erreichbar ist, wechselt der ESP32 automatisch in den Hotspot-Modus:
 
-| Parameter | Wert |
-|-----------|------|
+| Parameter | Standardwert |
+|-----------|--------------|
 | **SSID** | `ESP32S3_AP` |
 | **Passwort** | `DefaultPass!` |
 | **IP des ESP32** | `192.168.4.1` |
 
+SSID und Passwort des Fallback-AP sind unter **⚙ → Netzwerk & Seriell → WLAN FALLBACK-AP** anpassbar.
+
 Im Browser `http://192.168.4.1/` öffnen → **⚙** → Tab **Netzwerk & Seriell** → neue WLAN-Daten eintragen → **Speichern**. Der ESP startet automatisch neu und verbindet sich als STA mit dem neuen Netz.
 
-> Im Topbar wird der AP-Modus durch **⚠ AP-Modus** (gelb) angezeigt.
+> Im Topbar wird der AP-Modus durch **⚠ AP-Modus** (gelb) angezeigt. Bei deaktiviertem OTG erscheint zusätzlich **OTG DISABLED**.
 
-### Flashen am XIAO
+### Serial Monitor
+
+#### Mit ESP-IDF
 
 ```bash
-# Erstes Flash / nach Flash-Modus:
-idf.py -p /dev/cu.usbmodem* flash monitor
+# Linux / macOS — USB OTG deaktiviert (Standard):
+idf.py -p /dev/cu.usbmodem* monitor      # macOS
+idf.py -p /dev/ttyACM0 monitor           # Linux
 
-# Im Normalbetrieb (OTG aktiv): Monitor optional über UART an D6/D7:
-idf.py -p /dev/cu.usbserial* monitor
+# Windows — USB OTG deaktiviert (Standard):
+idf.py -p COM7 monitor
+
+# USB OTG aktiviert (Cisco am USB-C): Monitor über UART an D6/D7:
+idf.py -p /dev/cu.usbserial* monitor     # macOS
+idf.py -p COM3 monitor                   # Windows (USB-UART-Adapter)
 ```
+
+Monitor-Baudrate: **115200** (siehe `sdkconfig` → `CONFIG_ESPTOOLPY_MONITOR_BAUD`).
+
+#### Ohne ESP-IDF (Windows, PowerShell)
+
+Wenn `idf.py` nicht verfügbar ist, reicht ein einfacher Serial-Monitor über .NET:
+
+```powershell
+$port = New-Object System.IO.Ports.SerialPort COM7,115200,None,8,one
+$port.ReadTimeout = 500
+$port.Open()
+Write-Host "Serial Monitor COM7 @ 115200 — Ctrl+C zum Beenden"
+while ($true) {
+    try { $d = $port.ReadExisting(); if ($d) { Write-Host -NoNewline $d } } catch {}
+    Start-Sleep -Milliseconds 50
+}
+```
+
+> COM-Port im Geräte-Manager prüfen (`Serielles USB-Gerät`). Intel AMT/COM-Ports ignorieren.
 
 ## API
 
@@ -269,14 +322,28 @@ idf.py -p /dev/cu.usbserial* monitor
 |----------|---------|--------------|
 | `/` | GET | Web-Terminal (HTML) |
 | `/ws` | GET | WebSocket Konsole |
-| `/status` | GET | JSON: IP, ETH-IP, WireGuard-IP, Baud, USB, AP-Modus |
+| `/status` | GET | JSON: `ip`, `eth_ip`, `active_ip`, `wg_ip`, `wg_up`, `baud`, `usb`, `ap`, `otg_en` |
 | `/break` | POST | Break-Signal senden |
 | `/baud` | POST | Baudrate setzen (Body: Zahl als Text) |
-| `/config` | POST | WiFi + Baudrate speichern; `{"ok":true}` oder `{"ok":true,"rebooting":true}` im AP-Modus |
-| `/config-json` | GET | Aktuelle WiFi/Baud-Konfig als JSON (kein Passwort) |
+| `/config` | POST | Netzwerk/OTG/MAC/Baud speichern; `{"ok":true}` oder `{"ok":true,"rebooting":true}` |
+| `/config-json` | GET | Aktuelle Konfig als JSON (kein WLAN-Passwort) |
 | `/wg` | POST | WireGuard-Konfig speichern + Tunnel neu starten |
 | `/wg-json` | GET | Aktuelle WireGuard-Konfig als JSON (kein Privkey) |
 | `/reboot` | POST | ESP neu starten |
+| `/shutdown` | POST | ESP in Deep Sleep (Reset-Taste zum Einschalten) |
+
+### `/config` POST-Felder (URL-encoded)
+
+| Feld | Beschreibung |
+|------|--------------|
+| `ssid` | WLAN-SSID |
+| `password` | WLAN-Passwort (leer = unverändert) |
+| `baud` | Baudrate |
+| `otg_en` | `1` = USB OTG aktiv, `0` = deaktiviert (Neustart nötig) |
+| `ap_ssid` | Fallback-AP-SSID |
+| `ap_pass` | Fallback-AP-Passwort (leer = unverändert) |
+| `wifi_mac` | WLAN-MAC `XX:XX:XX:XX:XX:XX` (leer = Auto/eFuse, Neustart nötig) |
+| `eth_mac` | LAN-MAC `XX:XX:XX:XX:XX:XX` (leer = Auto/eFuse, Neustart nötig) |
 
 ### WireGuard VPN
 
@@ -308,7 +375,8 @@ PersistentKeepalive = 25
 **Hinweise:**
 
 - Der ESP32 synchronisiert die Systemzeit via **SNTP (NTP)** bevor WireGuard startet. Das ist notwendig, da WireGuard TAI64N-Timestamps in Handshake-Paketen verwendet — ohne korrekte Uhrzeit verwirft der Server die Initiierung (Replay-Schutz).
-- Der WireGuard-Status (`VPN-IP ✓` oder `…`) wird im Topbar angezeigt.
+- Bei Schnittstellenwechsel (ETH ↔ WiFi) wird WireGuard automatisch neu gestartet.
+- Der WireGuard-Status (`VPN-IP ✓` oder `…`) wird in der Statusleiste angezeigt.
 - Komponente: [`trombik/esp_wireguard`](https://github.com/trombik/esp_wireguard) (lokal in `components/` für IDF-6.0-Patches).
 
 ## Anforderungen

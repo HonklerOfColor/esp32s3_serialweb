@@ -85,7 +85,7 @@ esp_err_t eth_w5500_init(const char *custom_mac_str)
 
     /* 3 — W5500 MAC (neue API: Host-ID + Device-Config-Pointer) */
     eth_w5500_config_t w5500_cfg = ETH_W5500_DEFAULT_CONFIG(W5500_SPI_HOST, &devcfg);
-    w5500_cfg.int_gpio_num = W5500_INT_GPIO;
+    w5500_cfg.base.int_gpio_num = W5500_INT_GPIO;
 
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_cfg, &mac_cfg);

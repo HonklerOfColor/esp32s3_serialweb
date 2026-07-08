@@ -35,7 +35,14 @@ typedef struct {
     uint8_t  wg_keepalive;        /* Keepalive in Sekunden (Standard: 25)         */
 } app_config_t;
 
+#define AP_PASS_MIN_LEN  8
+#define AP_PASS_DEFAULT  "DefaultPass!"
+
 esp_err_t config_init(void);
 esp_err_t config_load(app_config_t *cfg);
 esp_err_t config_save(const app_config_t *cfg);
 const app_config_t* config_get_current(void);
+void config_normalize_ap_pass(char *pass, size_t size);
+bool config_ap_pass_valid(const char *pass);
+esp_err_t config_set_boot_ap(bool enable);
+bool config_consume_boot_ap(void);

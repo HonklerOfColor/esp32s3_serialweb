@@ -168,8 +168,8 @@ button.warn:hover { background:#2a2109; }
     </div>
     <div class="s-field">
       <label>AP-Passwort</label>
-      <input id="s-ap-pass" type="password" placeholder="leer lassen = unverändert" autocomplete="off">
-      <span style="font-size:11px;color:#6e7681">Aktiv wenn kein WLAN erreichbar (nach 8 Versuchen)</span>
+      <input id="s-ap-pass" type="password" placeholder="leer lassen = unverändert" autocomplete="off" minlength="8">
+      <span style="font-size:11px;color:#6e7681">Mindestens 8 Zeichen (WPA2). Standard: DefaultPass!</span>
     </div>
     <div class="s-section-title" style="margin-top:4px">MAC-Adressen</div>
     <div class="s-field">
@@ -569,12 +569,16 @@ function showSettingsMsg(which, text, color) {
 async function saveNetwork() {
   const wifiMac = document.getElementById('s-wifi-mac').value.trim();
   const ethMac  = document.getElementById('s-eth-mac').value.trim();
+  const apPass  = document.getElementById('s-ap-pass').value;
   const macPat  = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
   if (wifiMac && !macPat.test(wifiMac)) {
     showSettingsMsg('network', 'Ungültige WLAN-MAC (Format: XX:XX:XX:XX:XX:XX)', '#f85149'); return;
   }
   if (ethMac && !macPat.test(ethMac)) {
     showSettingsMsg('network', 'Ungültige LAN-MAC (Format: XX:XX:XX:XX:XX:XX)', '#f85149'); return;
+  }
+  if (apPass && apPass.length < 8) {
+    showSettingsMsg('network', 'AP-Passwort: mindestens 8 Zeichen', '#f85149'); return;
   }
   const params = new URLSearchParams({
     ssid:     document.getElementById('s-ssid').value,
@@ -595,6 +599,8 @@ async function saveNetwork() {
     } else if (j.ok) {
       showSettingsMsg('network', 'Gespeichert ✓', '#3fb950');
       updateBaud(document.getElementById('s-baud').value);
+    } else if (j.error === 'ap_pass_too_short') {
+      showSettingsMsg('network', 'AP-Passwort: mindestens 8 Zeichen', '#f85149');
     } else showSettingsMsg('network', 'Fehler', '#f85149');
   } catch(e) { showSettingsMsg('network', 'Netzwerkfehler', '#f85149'); }
 }

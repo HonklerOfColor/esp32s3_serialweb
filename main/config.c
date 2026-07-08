@@ -8,6 +8,52 @@ static const char *TAG = "config";
 
 static app_config_t current_config;
 
+bool config_ap_pass_valid(const char *pass)
+{
+    return pass && strlen(pass) >= AP_PASS_MIN_LEN;
+}
+
+void config_normalize_ap_pass(char *pass, size_t size)
+{
+    if (!pass || size == 0) return;
+    if (!config_ap_pass_valid(pass)) {
+        if (pass[0] != '\0')
+            ESP_LOGW(TAG, "AP-Passwort ungültig (%u Zeichen) — %s",
+                     (unsigned)strlen(pass), AP_PASS_DEFAULT);
+        strncpy(pass, AP_PASS_DEFAULT, size - 1);
+        pass[size - 1] = '\0';
+    }
+}
+
+esp_err_t config_set_boot_ap(bool enable)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(handle, "boot_ap", enable ? 1 : 0);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+bool config_consume_boot_ap(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK)
+        return false;
+
+    uint8_t v = 0;
+    if (nvs_get_u8(handle, "boot_ap", &v) != ESP_OK || v == 0) {
+        nvs_close(handle);
+        return false;
+    }
+
+    nvs_erase_key(handle, "boot_ap");
+    nvs_commit(handle);
+    nvs_close(handle);
+    return true;
+}
+
 esp_err_t config_init(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -76,7 +122,8 @@ esp_err_t config_load(app_config_t *cfg)
 
     len = sizeof(cfg->ap_pass);
     if (nvs_get_str(handle, "ap_pass", cfg->ap_pass, &len) != ESP_OK)
-        strncpy(cfg->ap_pass, "DefaultPass!", sizeof(cfg->ap_pass) - 1);
+        strncpy(cfg->ap_pass, AP_PASS_DEFAULT, sizeof(cfg->ap_pass) - 1);
+    config_normalize_ap_pass(cfg->ap_pass, sizeof(cfg->ap_pass));
 
     /* ---- MAC-Adressen ---- */
     len = sizeof(cfg->wifi_mac);
@@ -141,7 +188,10 @@ esp_err_t config_save(const app_config_t *cfg)
 
     /* AP-Fallback */
     nvs_set_str(handle, "ap_ssid", cfg->ap_ssid[0] ? cfg->ap_ssid : "ESP32S3_AP");
-    nvs_set_str(handle, "ap_pass", cfg->ap_pass[0] ? cfg->ap_pass : "DefaultPass!");
+    char ap_pass_save[65];
+    strlcpy(ap_pass_save, cfg->ap_pass[0] ? cfg->ap_pass : AP_PASS_DEFAULT, sizeof(ap_pass_save));
+    config_normalize_ap_pass(ap_pass_save, sizeof(ap_pass_save));
+    nvs_set_str(handle, "ap_pass", ap_pass_save);
 
     /* MAC-Adressen */
     nvs_set_str(handle, "wifi_mac", cfg->wifi_mac);

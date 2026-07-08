@@ -39,6 +39,9 @@ static const char *TAG = "cisco_oob";
 
 #define WIFI_MAX_RETRIES  8
 
+static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data);
+static esp_err_t wifi_apply_ap_config(const app_config_t *cfg);
+
 /* ===================== State ===================== */
 
 static httpd_handle_t server = NULL;
@@ -500,24 +503,76 @@ static void start_ap_mode(void)
     ap_mode = true;
     const app_config_t *cfg = config_get_current();
     const char *ssid = cfg->ap_ssid[0] ? cfg->ap_ssid : "ESP32S3_AP";
-    const char *pass = cfg->ap_pass[0] ? cfg->ap_pass : "DefaultPass!";
-    ESP_LOGW(TAG, "WiFi nicht erreichbar — starte Fallback-AP: SSID=%s", ssid);
+    ESP_LOGW(TAG, "WiFi nicht erreichbar — starte Fallback-AP: SSID=%s (Passwort: %u Zeichen)",
+             ssid, (unsigned)strlen(cfg->ap_pass));
 
     esp_wifi_disconnect();
     esp_wifi_stop();
     esp_wifi_set_mode(WIFI_MODE_AP);
 
+    esp_err_t err = wifi_apply_ap_config(cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "AP-Config fehlgeschlagen: %s", esp_err_to_name(err));
+        return;
+    }
+
+    ESP_ERROR_CHECK(esp_wifi_start());
+    /* Webserver startet im WIFI_EVENT_AP_START Handler */
+}
+
+static esp_err_t wifi_apply_ap_config(const app_config_t *cfg)
+{
+    char ssid[33];
+    char pass[65];
+
+    strlcpy(ssid, cfg->ap_ssid[0] ? cfg->ap_ssid : "ESP32S3_AP", sizeof(ssid));
+    strlcpy(pass, cfg->ap_pass[0] ? cfg->ap_pass : AP_PASS_DEFAULT, sizeof(pass));
+    config_normalize_ap_pass(pass, sizeof(pass));
+
     wifi_config_t ap_cfg = {0};
-    strlcpy((char *)ap_cfg.ap.ssid,     ssid, sizeof(ap_cfg.ap.ssid));
+    strlcpy((char *)ap_cfg.ap.ssid, ssid, sizeof(ap_cfg.ap.ssid));
     strlcpy((char *)ap_cfg.ap.password, pass, sizeof(ap_cfg.ap.password));
     ap_cfg.ap.ssid_len       = (uint8_t)strlen(ssid);
     ap_cfg.ap.channel        = 1;
     ap_cfg.ap.max_connection = 4;
-    ap_cfg.ap.authmode       = WIFI_AUTH_WPA2_PSK;
+    ap_cfg.ap.pmf_cfg.capable  = true;
+    ap_cfg.ap.pmf_cfg.required = false;
+#if CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT
+    ap_cfg.ap.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
+#else
+    ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+#endif
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
+    return esp_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+}
+
+static void wifi_stack_init_common(void)
+{
+    esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();
+    netif_apply_mtu("WIFI_STA_DEF");
+    netif_apply_mtu("WIFI_AP_DEF");
+
+    wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
+
+    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,              &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_STA_GOT_IP,           &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_ETH_GOT_IP,           &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_ETH_LOST_IP,          &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(ETH_EVENT,  ETHERNET_EVENT_CONNECTED,      &wifi_event_handler, NULL, NULL);
+    esp_event_handler_instance_register(ETH_EVENT,  ETHERNET_EVENT_DISCONNECTED,   &wifi_event_handler, NULL, NULL);
+}
+
+static void wifi_start_ap_direct(void)
+{
+    const app_config_t *cfg = config_get_current();
+    wifi_stack_init_common();
+    ESP_ERROR_CHECK(wifi_apply_ap_config(cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_start());
-    /* Webserver startet im WIFI_EVENT_AP_START Handler */
+    ap_mode = true;
+    ESP_LOGI(TAG, "Direktstart Fallback-AP: SSID=%s", cfg->ap_ssid[0] ? cfg->ap_ssid : "ESP32S3_AP");
 }
 
 /* Startet WireGuard erst nachdem NTP die Systemzeit synchronisiert hat.
@@ -634,25 +689,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
 static void wifi_init_sta(void)
 {
     const app_config_t *cfg = config_get_current();
-    esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();   /* Für AP-Fallback vorab anlegen */
-    netif_apply_mtu("WIFI_STA_DEF");
-    netif_apply_mtu("WIFI_AP_DEF");
-
-    wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
-
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,              &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_STA_GOT_IP,           &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_ETH_GOT_IP,           &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(IP_EVENT,   IP_EVENT_ETH_LOST_IP,          &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(ETH_EVENT,  ETHERNET_EVENT_CONNECTED,      &wifi_event_handler, NULL, NULL);
-    esp_event_handler_instance_register(ETH_EVENT,  ETHERNET_EVENT_DISCONNECTED,   &wifi_event_handler, NULL, NULL);
+    wifi_stack_init_common();
 
     wifi_config_t wifi_cfg = {0};
     strlcpy((char *)wifi_cfg.sta.ssid,     cfg->ssid,     sizeof(wifi_cfg.sta.ssid));
     strlcpy((char *)wifi_cfg.sta.password, cfg->password, sizeof(wifi_cfg.sta.password));
 
+    ESP_ERROR_CHECK(wifi_apply_ap_config(cfg));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
 
@@ -861,7 +904,7 @@ static bool mac_str_valid(const char *s)
 
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    char buf[512] = {0};
+    char buf[768] = {0};
     int total = 0, r;
     while ((r = httpd_req_recv(req, buf + total, sizeof(buf) - 1 - total)) > 0) {
         total += r;
@@ -871,11 +914,14 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 
     app_config_t new_cfg = *config_get_current();   /* alle Felder erhalten */
 
-    /* Merken ob MAC oder OTG sich ändert — dann ist Reboot nötig */
+    /* Merken ob MAC, OTG oder AP-Daten sich ändert */
     char old_wifi_mac[18], old_eth_mac[18];
+    char old_ap_ssid[33], old_ap_pass[65];
     bool old_otg_enabled = new_cfg.otg_enabled;
     strlcpy(old_wifi_mac, new_cfg.wifi_mac, sizeof(old_wifi_mac));
     strlcpy(old_eth_mac,  new_cfg.eth_mac,  sizeof(old_eth_mac));
+    strlcpy(old_ap_ssid,  new_cfg.ap_ssid,  sizeof(old_ap_ssid));
+    strlcpy(old_ap_pass,  new_cfg.ap_pass,  sizeof(old_ap_pass));
 
     form_field(buf, "ssid=", new_cfg.ssid, sizeof(new_cfg.ssid));
 
@@ -898,9 +944,16 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     form_field(buf, "ap_ssid=", ap_ssid_tmp, sizeof(ap_ssid_tmp));
     form_field(buf, "ap_pass=", ap_pass_tmp,  sizeof(ap_pass_tmp));
     if (ap_ssid_tmp[0]) strlcpy(new_cfg.ap_ssid, ap_ssid_tmp, sizeof(new_cfg.ap_ssid));
-    if (ap_pass_tmp[0])  strlcpy(new_cfg.ap_pass,  ap_pass_tmp,  sizeof(new_cfg.ap_pass));
+    if (ap_pass_tmp[0]) {
+        if (!config_ap_pass_valid(ap_pass_tmp)) {
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"ap_pass_too_short\"}");
+            return ESP_OK;
+        }
+        strlcpy(new_cfg.ap_pass, ap_pass_tmp, sizeof(new_cfg.ap_pass));
+    }
     if (new_cfg.ap_ssid[0] == '\0') strlcpy(new_cfg.ap_ssid, "ESP32S3_AP", sizeof(new_cfg.ap_ssid));
-    if (new_cfg.ap_pass[0]  == '\0') strlcpy(new_cfg.ap_pass,  "DefaultPass!", sizeof(new_cfg.ap_pass));
+    config_normalize_ap_pass(new_cfg.ap_pass, sizeof(new_cfg.ap_pass));
 
     /* MAC-Adressen */
     char wifi_mac_tmp[18] = {0};
@@ -920,14 +973,22 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     bool mac_changed = (strcmp(old_wifi_mac, new_cfg.wifi_mac) != 0) ||
                        (strcmp(old_eth_mac,  new_cfg.eth_mac)  != 0);
     bool otg_changed = (old_otg_enabled != new_cfg.otg_enabled);
+    bool ap_changed  = (strcmp(old_ap_ssid, new_cfg.ap_ssid) != 0) ||
+                       (strcmp(old_ap_pass,  new_cfg.ap_pass)  != 0);
 
     if (new_cfg.ssid[0] == '\0') strlcpy(new_cfg.ssid, "net1", sizeof(new_cfg.ssid));
 
     config_save(&new_cfg);
     set_baud(new_cfg.baud_rate);
 
+    if (ap_mode)
+        config_set_boot_ap(true);
+
+    if (!ap_mode && ap_changed)
+        wifi_apply_ap_config(&new_cfg);
+
     if (ap_mode || mac_changed || otg_changed) {
-        /* Reboot erforderlich: AP-Modus, MAC- oder OTG-Änderung */
+        /* Reboot erforderlich: AP-Modus aktiv, MAC- oder OTG-Änderung */
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
         esp_timer_handle_t t;
@@ -1210,7 +1271,10 @@ void app_main(void)
     }
 
     /* WiFi */
-    wifi_init_sta();
+    if (config_consume_boot_ap())
+        wifi_start_ap_direct();
+    else
+        wifi_init_sta();
 
     /* W5500 SPI-Ethernet (IP_EVENT_ETH_GOT_IP wird vom wifi_event_handler mitbehandelt) */
     if (eth_w5500_init(cfg.eth_mac[0] ? cfg.eth_mac : NULL) != ESP_OK) {
