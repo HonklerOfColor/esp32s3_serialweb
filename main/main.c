@@ -20,6 +20,7 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_sntp.h"
+#include "esp_sleep.h"
 #include "usb/cdc_acm_host.h"
 #include "usb/usb_host.h"
 
@@ -100,7 +101,9 @@ static void remove_ws_client(int fd);
 static void broadcast_to_ws(const uint8_t *data, size_t len);
 static httpd_handle_t start_webserver(void);
 static void reboot_timer_cb(void *arg);
+static void shutdown_timer_cb(void *arg);
 static esp_err_t reboot_handler(httpd_req_t *req);
+static esp_err_t shutdown_handler(httpd_req_t *req);
 static esp_err_t ws_post_handshake_cb(httpd_req_t *req);
 
 /* ===================== WebSocket client management ===================== */
@@ -426,8 +429,71 @@ static void set_baud(uint32_t baud)
 static bool wg_started    = false;
 static bool sntp_started  = false;
 static bool ap_mode       = false;
+static bool otg_enabled   = false;   /* true nur wenn USB-Host-Code aktiv */
 static int  wifi_retries  = 0;
 static bool eth_connected = false;
+static bool wifi_sta_off  = false;   /* true wenn STA wegen ETH-IP gestoppt */
+
+static void netif_apply_mtu(const char *ifkey)
+{
+    esp_netif_t *n = esp_netif_get_handle_from_ifkey(ifkey);
+    if (!n) return;
+    esp_err_t e = esp_netif_set_mtu(n, NETIF_MTU);
+    if (e == ESP_OK)
+        ESP_LOGI(TAG, "MTU %d: %s", NETIF_MTU, ifkey);
+    else
+        ESP_LOGW(TAG, "MTU %s: %s", ifkey, esp_err_to_name(e));
+}
+
+static bool eth_has_active_ip(void)
+{
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("ETH_DEF");
+    if (!netif) return false;
+    esp_netif_ip_info_t ip = {0};
+    esp_netif_get_ip_info(netif, &ip);
+    return ip.ip.addr != 0;
+}
+
+/* ETH hat DHCP-IP → WLAN-STA komplett abschalten (Strom sparen, kein Dual-Radio) */
+static void wifi_sta_shutdown(void)
+{
+    if (ap_mode || wifi_sta_off) return;
+    wifi_sta_off = true;
+    wifi_retries = 0;
+    ESP_LOGI(TAG, "ETH mit IP aktiv — WLAN STA wird ausgeschaltet");
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_wifi_stop();
+}
+
+/* ETH-IP/Link weg → WLAN-STA wieder starten */
+static void wifi_sta_restore(void)
+{
+    if (ap_mode || !wifi_sta_off) return;
+    if (eth_has_active_ip()) return;
+    wifi_sta_off = false;
+    wifi_retries = 0;
+    ESP_LOGI(TAG, "ETH inaktiv — WLAN STA wird wieder aktiviert");
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_err_t e = esp_wifi_start();
+    if (e != ESP_OK)
+        ESP_LOGW(TAG, "WLAN-Start fehlgeschlagen: %s", esp_err_to_name(e));
+}
+
+/* WireGuard neu starten wenn Underlay-Interface wechselt (ETH ↔ WiFi). */
+static void wg_client_restart_if_running(void)
+{
+    if (!wg_started) return;
+    const app_config_t *cfg = config_get_current();
+    if (!cfg->wg_enabled) return;
+
+    ESP_LOGI(TAG, "WireGuard-Neustart wegen Schnittstellenwechsel");
+    wg_client_stop();
+    esp_err_t ret = wg_client_start();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "WireGuard Neustart: %s", esp_err_to_name(ret));
+    }
+}
 
 static void start_ap_mode(void)
 {
@@ -490,14 +556,16 @@ static void wg_start_after_ntp_task(void *arg)
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        if (!wifi_sta_off)
+            esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (wifi_sta_off || eth_connected) return;
         if (!ap_mode) {
             wifi_retries++;
             if (wifi_retries <= WIFI_MAX_RETRIES) {
                 ESP_LOGW(TAG, "WiFi disconnected — Retry %d/%d", wifi_retries, WIFI_MAX_RETRIES);
                 esp_wifi_connect();
-            } else {
+            } else if (!eth_has_active_ip()) {
                 start_ap_mode();
             }
         }
@@ -511,9 +579,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         eth_connected = true;
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
         ESP_LOGI(TAG, "Ethernet (W5500) — IP: " IPSTR, IP2STR(&ev->ip_info.ip));
-        /* ETH hat höhere Priorität — als Standard-Schnittstelle setzen */
         esp_netif_t *eth_netif = esp_netif_get_handle_from_ifkey("ETH_DEF");
         if (eth_netif) esp_netif_set_default_netif(eth_netif);
+        if (ev->ip_info.ip.addr != 0)
+            wifi_sta_shutdown();
+        wg_client_restart_if_running();
         if (!server) start_webserver();
         if (!sntp_started) {
             sntp_started = true;
@@ -532,9 +602,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         if (!eth_connected) {
             esp_netif_t *wifi_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
             if (wifi_netif) esp_netif_set_default_netif(wifi_netif);
-        } else {
-            ESP_LOGI(TAG, "ETH aktiv — WiFi bleibt Fallback");
         }
+        wg_client_restart_if_running();
         if (!server) start_webserver();
         if (!sntp_started) {
             sntp_started = true;
@@ -546,34 +615,16 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             xTaskCreate(wg_start_after_ntp_task, "wg_ntp", 2560, NULL, 4, NULL);
         }
     } else if (base == IP_EVENT && id == IP_EVENT_ETH_LOST_IP) {
-        /* DHCP-Lease abgelaufen — selbe Behandlung wie Link-Down */
         if (eth_connected) {
             eth_connected = false;
-            ESP_LOGW(TAG, "ETH-IP verloren (DHCP) — Fallback auf WiFi");
-            esp_netif_t *wifi_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-            if (wifi_netif) {
-                esp_netif_ip_info_t ip = {0};
-                esp_netif_get_ip_info(wifi_netif, &ip);
-                if (ip.ip.addr != 0) {
-                    esp_netif_set_default_netif(wifi_netif);
-                    ESP_LOGI(TAG, "WiFi als Standard-Schnittstelle gesetzt");
-                }
-            }
+            ESP_LOGW(TAG, "ETH-IP verloren (DHCP) — WLAN wird reaktiviert");
+            wifi_sta_restore();
         }
     } else if (base == ETH_EVENT && id == ETHERNET_EVENT_DISCONNECTED) {
-        /* Physischer Link-Down: sofort auf WiFi umschalten, nicht auf DHCP-Timeout warten */
         if (eth_connected) {
             eth_connected = false;
-            ESP_LOGW(TAG, "ETH Link Down — sofortiger Fallback auf WiFi");
-            esp_netif_t *wifi_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-            if (wifi_netif) {
-                esp_netif_ip_info_t ip = {0};
-                esp_netif_get_ip_info(wifi_netif, &ip);
-                if (ip.ip.addr != 0) {
-                    esp_netif_set_default_netif(wifi_netif);
-                    ESP_LOGI(TAG, "WiFi als Standard-Schnittstelle gesetzt");
-                }
-            }
+            ESP_LOGW(TAG, "ETH Link Down — WLAN wird reaktiviert");
+            wifi_sta_restore();
         }
     } else if (base == ETH_EVENT && id == ETHERNET_EVENT_CONNECTED) {
         ESP_LOGI(TAG, "ETH Link Up — warte auf DHCP-IP");
@@ -585,6 +636,8 @@ static void wifi_init_sta(void)
     const app_config_t *cfg = config_get_current();
     esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();   /* Für AP-Fallback vorab anlegen */
+    netif_apply_mtu("WIFI_STA_DEF");
+    netif_apply_mtu("WIFI_AP_DEF");
 
     wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
@@ -627,6 +680,10 @@ static void wifi_init_sta(void)
 
 static void wifi_reconnect(const char *ssid, const char *pass)
 {
+    if (wifi_sta_off || eth_connected) {
+        ESP_LOGI(TAG, "WLAN-Reconnect übersprungen — ETH aktiv bzw. STA aus");
+        return;
+    }
     wifi_config_t wifi_cfg = {0};
     strlcpy((char *)wifi_cfg.sta.ssid,     ssid, sizeof(wifi_cfg.sta.ssid));
     strlcpy((char *)wifi_cfg.sta.password, pass, sizeof(wifi_cfg.sta.password));
@@ -675,7 +732,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
              "{\"ip\":\"" IPSTR "\",\"eth_ip\":\"" IPSTR "\","
              "\"active_ip\":\"" IPSTR "\","
              "\"wg_ip\":\"%s\",\"wg_up\":%s,"
-             "\"baud\":%lu,\"usb\":%s,\"ap\":%s}",
+             "\"baud\":%lu,\"usb\":%s,\"ap\":%s,\"otg_en\":%s}",
              IP2STR(&wifi_ip.ip),
              IP2STR(&eth_ip.ip),
              IP2STR(&active_ip.ip),
@@ -683,7 +740,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
              wg_client_is_up() ? "true" : "false",
              (unsigned long)current_baud,
              cdc_connected ? "true" : "false",
-             ap_mode ? "true" : "false");
+             ap_mode ? "true" : "false",
+             otg_enabled ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, buf);
@@ -739,14 +797,15 @@ static esp_err_t config_json_get_handler(httpd_req_t *req)
                  "%02x:%02x:%02x:%02x:%02x:%02x",
                  em[0], em[1], em[2], em[3], em[4], em[5]);
 
-    char buf[384];
+    char buf[448];
     snprintf(buf, sizeof(buf),
-             "{\"ssid\":\"%s\",\"baud\":%lu,"
+             "{\"ssid\":\"%s\",\"baud\":%lu,\"otg_enabled\":%s,"
              "\"ap_ssid\":\"%s\","
              "\"wifi_mac\":\"%s\",\"wifi_mac_auto\":\"%s\","
              "\"eth_mac\":\"%s\",\"eth_mac_auto\":\"%s\"}",
              cfg->ssid,
              (unsigned long)cfg->baud_rate,
+             cfg->otg_enabled ? "true" : "false",
              cfg->ap_ssid[0] ? cfg->ap_ssid : "ESP32S3_AP",
              cfg->wifi_mac,
              wifi_mac_cur,
@@ -812,17 +871,26 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 
     app_config_t new_cfg = *config_get_current();   /* alle Felder erhalten */
 
-    /* Merken ob MAC sich ändert — dann ist Reboot nötig */
+    /* Merken ob MAC oder OTG sich ändert — dann ist Reboot nötig */
     char old_wifi_mac[18], old_eth_mac[18];
+    bool old_otg_enabled = new_cfg.otg_enabled;
     strlcpy(old_wifi_mac, new_cfg.wifi_mac, sizeof(old_wifi_mac));
     strlcpy(old_eth_mac,  new_cfg.eth_mac,  sizeof(old_eth_mac));
 
-    form_field(buf, "ssid=",     new_cfg.ssid,     sizeof(new_cfg.ssid));
-    form_field(buf, "password=", new_cfg.password, sizeof(new_cfg.password));
+    form_field(buf, "ssid=", new_cfg.ssid, sizeof(new_cfg.ssid));
+
+    char password_tmp[65] = {0};
+    form_field(buf, "password=", password_tmp, sizeof(password_tmp));
+    if (password_tmp[0]) strlcpy(new_cfg.password, password_tmp, sizeof(new_cfg.password));
 
     char baud_str[16];
     form_field(buf, "baud=", baud_str, sizeof(baud_str));
     new_cfg.baud_rate = baud_str[0] ? (uint32_t)atoi(baud_str) : 9600;
+
+    char otg_str[8] = {0};
+    form_field(buf, "otg_en=", otg_str, sizeof(otg_str));
+    if (otg_str[0])
+        new_cfg.otg_enabled = (otg_str[0] == '1');
 
     /* AP-Fallback */
     char ap_ssid_tmp[33] = {0};
@@ -851,14 +919,15 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 
     bool mac_changed = (strcmp(old_wifi_mac, new_cfg.wifi_mac) != 0) ||
                        (strcmp(old_eth_mac,  new_cfg.eth_mac)  != 0);
+    bool otg_changed = (old_otg_enabled != new_cfg.otg_enabled);
 
     if (new_cfg.ssid[0] == '\0') strlcpy(new_cfg.ssid, "net1", sizeof(new_cfg.ssid));
 
     config_save(&new_cfg);
     set_baud(new_cfg.baud_rate);
 
-    if (ap_mode || mac_changed) {
-        /* Reboot erforderlich: AP-Modus oder MAC-Änderung */
+    if (ap_mode || mac_changed || otg_changed) {
+        /* Reboot erforderlich: AP-Modus, MAC- oder OTG-Änderung */
         httpd_resp_set_type(req, "application/json");
         httpd_resp_sendstr(req, "{\"ok\":true,\"rebooting\":true}");
         esp_timer_handle_t t;
@@ -1062,6 +1131,8 @@ static httpd_handle_t start_webserver(void)
         httpd_register_uri_handler(server, &(httpd_uri_t){
             .uri="/reboot", .method=HTTP_POST, .handler=reboot_handler});
         httpd_register_uri_handler(server, &(httpd_uri_t){
+            .uri="/shutdown", .method=HTTP_POST, .handler=shutdown_handler});
+        httpd_register_uri_handler(server, &(httpd_uri_t){
             .uri="/wg", .method=HTTP_POST, .handler=wg_post_handler});
         httpd_register_uri_handler(server, &(httpd_uri_t){
             .uri="/wg-json", .method=HTTP_GET, .handler=wg_json_get_handler});
@@ -1078,6 +1149,14 @@ static void reboot_timer_cb(void *arg)
     esp_restart();
 }
 
+static void shutdown_timer_cb(void *arg)
+{
+    ESP_LOGI(TAG, "Shutdown — Deep Sleep (Reset zum Einschalten)");
+    wg_client_stop();
+    esp_wifi_stop();
+    esp_deep_sleep_start();
+}
+
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -1087,6 +1166,21 @@ static esp_err_t reboot_handler(httpd_req_t *req)
         "<script>setTimeout(()=>location.href='/',5000)</script>"
         "</body></html>");
     const esp_timer_create_args_t ta = {.callback = reboot_timer_cb, .name = "reboot"};
+    esp_timer_handle_t t;
+    esp_timer_create(&ta, &t);
+    esp_timer_start_once(t, 500 * 1000);
+    return ESP_OK;
+}
+
+static esp_err_t shutdown_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr(req,
+        "<html><body style='font-family:sans-serif;margin:2em;background:#111;color:#ddd'>"
+        "<h2>Shutdown</h2><p>ESP32 wird ausgeschaltet.</p>"
+        "<p style='color:#888'>Zum Einschalten Reset-Taste drücken oder Strom kurz trennen.</p>"
+        "</body></html>");
+    const esp_timer_create_args_t ta = {.callback = shutdown_timer_cb, .name = "shutdown"};
     esp_timer_handle_t t;
     esp_timer_create(&ta, &t);
     esp_timer_start_once(t, 500 * 1000);
@@ -1107,7 +1201,13 @@ void app_main(void)
     config_load(&cfg);
     current_baud = cfg.baud_rate;
 
-    // usb_host_init_delayed();  /* DEBUG: OTG temporär deaktiviert */
+    if (cfg.otg_enabled) {
+        usb_host_init_delayed();
+        otg_enabled = true;
+    } else {
+        otg_enabled = false;
+        ESP_LOGI(TAG, "USB OTG deaktiviert — in Einstellungen aktivieren + Neustart");
+    }
 
     /* WiFi */
     wifi_init_sta();

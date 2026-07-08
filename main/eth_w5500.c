@@ -7,6 +7,7 @@
  */
 
 #include "eth_w5500.h"
+#include "config.h"
 
 #include "driver/spi_master.h"
 #include "esp_eth.h"
@@ -153,6 +154,12 @@ esp_err_t eth_w5500_init(const char *custom_mac_str)
         ESP_LOGE(TAG, "ETH-Netif konnte nicht erstellt werden");
         return ESP_FAIL;
     }
+
+    esp_err_t mtu_err = esp_netif_set_mtu(eth_netif, NETIF_MTU);
+    if (mtu_err == ESP_OK)
+        ESP_LOGI(TAG, "MTU %d: ETH_DEF", NETIF_MTU);
+    else
+        ESP_LOGW(TAG, "MTU ETH_DEF: %s", esp_err_to_name(mtu_err));
 
     /* 7 — Glue-Layer: Ethernet-Treiber ↔ Netif verknüpfen */
     esp_eth_netif_glue_handle_t eth_glue = esp_eth_new_netif_glue(eth_handle);

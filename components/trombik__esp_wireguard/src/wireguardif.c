@@ -59,6 +59,46 @@
 
 #define TAG "wireguardif"
 
+#if defined(CONFIG_WIREGUARD_ESP_NETIF)
+/* ETH bevorzugen wenn aktiv (WLAN wird bei ETH-IP abgeschaltet). */
+static struct netif *wireguardif_pick_underlying_netif(void)
+{
+	static const char * const ifkeys[] = {"ETH_DEF", "WIFI_STA_DEF"};
+	char lwip_name[8];
+
+	for (size_t i = 0; i < sizeof(ifkeys) / sizeof(ifkeys[0]); i++) {
+		esp_netif_t *esp_netif = esp_netif_get_handle_from_ifkey(ifkeys[i]);
+		if (!esp_netif) {
+			continue;
+		}
+		esp_netif_ip_info_t ip = {0};
+		if (esp_netif_get_ip_info(esp_netif, &ip) != ESP_OK || ip.ip.addr == 0) {
+			continue;
+		}
+		if (esp_netif_get_netif_impl_name(esp_netif, lwip_name) != ESP_OK) {
+			continue;
+		}
+		struct netif *n = netif_find(lwip_name);
+		if (n != NULL) {
+			ESP_LOGI(TAG, "WireGuard underlay: %s (%s)", ifkeys[i], lwip_name);
+			return n;
+		}
+	}
+
+	esp_netif_t *def = esp_netif_get_default_netif();
+	if (def && esp_netif_get_netif_impl_name(def, lwip_name) == ESP_OK) {
+		struct netif *n = netif_find(lwip_name);
+		if (n != NULL) {
+			ESP_LOGI(TAG, "WireGuard underlay: default (%s)", lwip_name);
+			return n;
+		}
+	}
+
+	ESP_LOGE(TAG, "Kein Underlay-Netif mit IP gefunden");
+	return NULL;
+}
+#endif
+
 static void update_peer_addr(struct wireguard_peer *peer, const ip_addr_t *addr, u16_t port) {
 	peer->ip = *addr;
 	peer->port = port;
@@ -900,7 +940,6 @@ static void wireguardif_tmr(void *arg) {
 
 err_t wireguardif_init(struct netif *netif) {
 	err_t result;
-	esp_err_t err;
 	struct wireguardif_init_data *init_data;
 	struct wireguard_device *device;
 	struct udp_pcb *udp;
@@ -908,24 +947,14 @@ err_t wireguardif_init(struct netif *netif) {
 	size_t private_key_len = sizeof(private_key);
 
 #if defined(CONFIG_WIREGUARD_ESP_NETIF)
-	struct netif* underlying_netif = NULL;
-	char lwip_netif_name[8] = {0,};
-
-	err = esp_netif_get_netif_impl_name(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), lwip_netif_name);
-	if (err != ESP_OK) {
-		ESP_LOGE(TAG, "esp_netif_get_netif_impl_name: %s", esp_err_to_name(err));
-		result = ERR_IF;
-		goto fail;
-	}
-	underlying_netif = netif_find(lwip_netif_name);
+	struct netif *underlying_netif = wireguardif_pick_underlying_netif();
 	if (underlying_netif == NULL) {
-		ESP_LOGE(TAG, "netif_find: cannot find WIFI_STA_DEF");
 		result = ERR_IF;
 		goto fail;
 	}
 #elif defined(CONFIG_WIREGUARD_ESP_TCPIP_ADAPTER)
 	void *underlying_netif = NULL;
-	err = tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_STA, &underlying_netif);
+	esp_err_t err = tcpip_adapter_get_netif(TCPIP_ADAPTER_IF_STA, &underlying_netif);
 	if (err != ESP_OK) {
 		ESP_LOGE(TAG, "tcpip_adapter_get_netif: %s", esp_err_to_name(err));
 		result = ERR_IF;

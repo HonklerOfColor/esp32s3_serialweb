@@ -27,6 +27,7 @@ esp_err_t config_load(app_config_t *cfg)
         strncpy(cfg->ssid,     "net1",             sizeof(cfg->ssid)     - 1);
         strncpy(cfg->password, "GEcw5gRacTDWDvdb", sizeof(cfg->password) - 1);
         cfg->baud_rate = 9600;
+        cfg->otg_enabled = false;
         strncpy(cfg->ap_ssid, "ESP32S3_AP",   sizeof(cfg->ap_ssid) - 1);
         strncpy(cfg->ap_pass, "DefaultPass!", sizeof(cfg->ap_pass) - 1);
         cfg->wifi_mac[0] = '\0';
@@ -51,12 +52,22 @@ esp_err_t config_load(app_config_t *cfg)
         strncpy(cfg->ssid, "net1", sizeof(cfg->ssid) - 1);
 
     len = sizeof(cfg->password);
-    if (nvs_get_str(handle, "password", cfg->password, &len) != ESP_OK)
+    if (nvs_get_str(handle, "password", cfg->password, &len) != ESP_OK ||
+        cfg->password[0] == '\0') {
+        if (cfg->password[0] == '\0')
+            ESP_LOGW(TAG, "WLAN-Passwort in NVS leer — Standardwert wird verwendet");
         strncpy(cfg->password, "GEcw5gRacTDWDvdb", sizeof(cfg->password) - 1);
+    }
 
     if (nvs_get_u32(handle, "baud", &cfg->baud_rate) != ESP_OK ||
         cfg->baud_rate < 1200 || cfg->baud_rate > 230400)
         cfg->baud_rate = 9600;
+
+    uint8_t otg_en = 0;
+    if (nvs_get_u8(handle, "otg_en", &otg_en) != ESP_OK)
+        cfg->otg_enabled = false;
+    else
+        cfg->otg_enabled = (bool)otg_en;
 
     /* ---- AP-Fallback ---- */
     len = sizeof(cfg->ap_ssid);
@@ -109,9 +120,10 @@ esp_err_t config_load(app_config_t *cfg)
 
     nvs_close(handle);
     memcpy(&current_config, cfg, sizeof(app_config_t));
-    ESP_LOGI(TAG, "Config geladen: SSID=%s Baud=%lu WG=%s",
+    ESP_LOGI(TAG, "Config geladen: SSID=%s Baud=%lu WG=%s OTG=%s",
              cfg->ssid, (unsigned long)cfg->baud_rate,
-             cfg->wg_enabled ? "aktiv" : "deaktiviert");
+             cfg->wg_enabled ? "aktiv" : "deaktiviert",
+             cfg->otg_enabled ? "aktiv" : "deaktiviert");
     return ESP_OK;
 }
 
@@ -125,6 +137,7 @@ esp_err_t config_save(const app_config_t *cfg)
     nvs_set_str(handle, "ssid",     cfg->ssid);
     nvs_set_str(handle, "password", cfg->password);
     nvs_set_u32(handle, "baud",     cfg->baud_rate);
+    nvs_set_u8( handle, "otg_en",   cfg->otg_enabled ? 1 : 0);
 
     /* AP-Fallback */
     nvs_set_str(handle, "ap_ssid", cfg->ap_ssid[0] ? cfg->ap_ssid : "ESP32S3_AP");

@@ -6,11 +6,15 @@
 
 #define CONFIG_NAMESPACE "cisco_oob"
 
+/* WireGuard-kompatibel: 1500 − 80 Byte Tunnel-Overhead */
+#define NETIF_MTU 1420
+
 typedef struct {
     /* WiFi STA */
     char ssid[33];
     char password[65];
     uint32_t baud_rate;
+    bool     otg_enabled;   /* USB OTG Host für Cisco-Konsole (erfordert Neustart) */
 
     /* WiFi AP-Fallback */
     char ap_ssid[33];
